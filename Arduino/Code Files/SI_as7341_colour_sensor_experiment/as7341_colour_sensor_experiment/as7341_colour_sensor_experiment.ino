@@ -42,7 +42,7 @@ void setup() {
   // Reduce to GAIN_64X if all channels show 65535 (saturated)
   as7341.setATIME(100);
   as7341.setASTEP(999);
-  as7341.setGain(AS7341_GAIN_256X);
+  as7341.setGain(AS7341_GAIN_16X);
 
   speak("Colour lab ready. Button one for object. Button two for liquid. Button three for filter.");
   Serial.println("Ready.");
@@ -60,35 +60,71 @@ void loop() {
 // ════════════════════════════════════════════════════
 void modeA() {
   beep();
-  speak("Hold sensor 1 to 3 centimetres above object. Reading in 2 seconds.");
+  speak("Hold sensor above object. Reading in 2 seconds.");
   delay(2000);
 
-  uint16_t r[12];
-  if (!as7341.readAllChannels(r)) { speak("Sensor error. Try again."); return; }
+  // Take 5 readings and average them — reduces noise
+  uint32_t avg[8] = {0};
+  for (int s = 0; s < 5; s++) {
+    uint16_t r[12];
+    if (!as7341.readAllChannels(r)) { speak("Sensor error."); return; }
+    for (int i = 0; i < 8; i++) avg[i] += r[i];
+    delay(100);
+  }
+  for (int i = 0; i < 8; i++) avg[i] /= 5;
 
-  int peak = 0; uint16_t pv = 0;
-  for (int i=0;i<8;i++) if(r[i]>pv){pv=r[i];peak=i;}
+  // Print raw averaged values for calibration
+  Serial.print("Averaged channels: ");
+  for (int i = 0; i < 8; i++) { Serial.print(avg[i]); Serial.print(" "); }
+  Serial.println();
 
-  if (pv < 500) { speak("Reading too low. Move sensor closer."); return; }
+  // Find total light level
+  uint32_t total = 0;
+  for (int i = 0; i < 8; i++) total += avg[i];
 
-  uint16_t minv = 65535;
-  for(int i=0;i<8;i++) if(r[i]<minv) minv=r[i];
-  float ratio = (float)minv/pv;
-
-  char msg[80];
-  if      (ratio > 0.8) speak("This object appears white or light grey.");
-  else if (pv < 1000 && ratio < 0.3) speak("This object appears very dark or black.");
-  else {
-    const char* cols[] = {"violet","indigo blue","blue","cyan",
-                           "green","yellow","orange","red"};
-    sprintf(msg, "Dominant colour is %s.", cols[peak]);
-    speak(msg);
+  if (total < 2000) {
+    speak("Too dark. Move sensor closer or improve lighting.");
+    return;
   }
 
-  // Print raw channel values to Serial Monitor for calibration
-  Serial.print("Channels: ");
-  for(int i=0;i<8;i++){Serial.print(r[i]);Serial.print(" ");}
-  Serial.println();
+  // Calculate percentage contribution of each channel
+  float pct[8];
+  for (int i = 0; i < 8; i++) pct[i] = (float)avg[i] / total * 100.0;
+
+  // Check white/grey — all channels roughly equal
+  float maxPct = 0, minPct = 100;
+  int peakCh = 0;
+  for (int i = 0; i < 8; i++) {
+    if (pct[i] > maxPct) { maxPct = pct[i]; peakCh = i; }
+    if (pct[i] < minPct) minPct = pct[i];
+  }
+
+  char msg[80];
+
+  if ((maxPct - minPct) < 4.0) {
+    speak("This object appears white or grey.");
+    return;
+  }
+
+  // Group channels into colour families using ratios
+  float violet_blue = pct[0] + pct[1] + pct[2];  // F1+F2+F3
+  float green_cyan  = pct[3] + pct[4];            // F4+F5
+  float yellow_red  = pct[5] + pct[6] + pct[7];  // F6+F7+F8
+
+  const char* colour;
+
+  if (yellow_red > 45 && pct[7] > pct[5]) colour = "red";
+  else if (yellow_red > 45 && pct[5] > pct[7]) colour = "yellow or orange";
+  else if (yellow_red > 40 && pct[6] > 15)     colour = "orange";
+  else if (green_cyan > 40 && pct[4] > pct[3]) colour = "green";
+  else if (green_cyan > 35 && pct[3] > pct[4]) colour = "cyan";
+  else if (violet_blue > 40 && pct[2] > 15)    colour = "blue";
+  else if (violet_blue > 35 && pct[1] > pct[0]) colour = "indigo";
+  else if (violet_blue > 30 && pct[0] > pct[1]) colour = "violet";
+  else colour = "mixed or uncertain";
+
+  sprintf(msg, "Dominant colour is %s.", colour);
+  speak(msg);
 }
 
 // ════════════════════════════════════════════════════
